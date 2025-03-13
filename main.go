@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -131,7 +132,8 @@ func processMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, dynalistTok
 					if note != "" {
 						note += "\n\n"
 					}
-					note += fmt.Sprintf("Image: %s", mediaURL) //blob:https://dash.cloudflare.com/86e17624-7e1f-49af-bf44-673570bf9bdb
+					pathURL := mediaURL[strings.LastIndex(strings.TrimSuffix(mediaURL, "/details"), "/")+1:]
+					note += fmt.Sprintf("Image: %s", r2Client.GetDashboardURL(pathURL))
 				}
 			}
 		}

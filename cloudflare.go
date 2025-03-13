@@ -20,6 +20,7 @@ import (
 type CloudflareR2Client struct {
 	s3Client   *s3.Client
 	bucketName string
+	accountID  string
 }
 
 // NewCloudflareR2Client creates a new Cloudflare R2 client
@@ -56,7 +57,14 @@ func NewCloudflareR2Client() (*CloudflareR2Client, error) {
 	return &CloudflareR2Client{
 		s3Client:   s3Client,
 		bucketName: bucketName,
+		accountID:  accountID,
 	}, nil
+}
+
+// GetDashboardURL returns the Cloudflare dashboard URL for an object
+func (c *CloudflareR2Client) GetDashboardURL(objectPath string) string {
+	return fmt.Sprintf("https://dash.cloudflare.com/%s/r2/default/buckets/%s/objects/%s",
+		c.accountID, c.bucketName, objectPath)
 }
 
 // UploadFile uploads a file to Cloudflare R2 and returns the Cloudflare dashboard URL
@@ -79,12 +87,9 @@ func (c *CloudflareR2Client) UploadFile(fileData []byte, fileExt string) (string
 		return "", fmt.Errorf("failed to upload file to R2: %w", err)
 	}
 
-	// Get account ID from environment
-	accountID := os.Getenv("CF_ACCOUNT_ID")
-
 	// Return the Cloudflare dashboard URL
 	return fmt.Sprintf("https://dash.cloudflare.com/%s/r2/default/buckets/%s/objects/%s/details",
-		accountID, c.bucketName, fileName), nil
+		c.accountID, c.bucketName, fileName), nil
 }
 
 // DownloadFileFromTelegram downloads a file from Telegram
