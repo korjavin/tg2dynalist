@@ -1,39 +1,13 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
-
-const (
-	dynalistAPIURL = "https://dynalist.io/api/v1/inbox/add"
-)
-
-// DynalistRequest represents the request body for the Dynalist API
-type DynalistRequest struct {
-	Token    string `json:"token"`
-	Index    int    `json:"index,omitempty"`
-	Content  string `json:"content"`
-	Note     string `json:"note,omitempty"`
-	Checked  bool   `json:"checked,omitempty"`
-	Checkbox bool   `json:"checkbox,omitempty"`
-}
-
-// DynalistResponse represents the response from the Dynalist API
-type DynalistResponse struct {
-	Code    string `json:"_code"`
-	Message string `json:"_msg,omitempty"`
-	FileID  string `json:"file_id,omitempty"`
-	NodeID  string `json:"node_id,omitempty"`
-	Index   int    `json:"index,omitempty"`
-}
 
 func main() {
 	// Get environment variables
@@ -50,6 +24,20 @@ func main() {
 	tgUserID, err := strconv.ParseInt(tgUserIDStr, 10, 64)
 	if err != nil {
 		log.Fatalf("Invalid TG_USER_ID: %v", err)
+	}
+
+	// Initialize Cloudflare R2 client if environment variables are set
+	var r2Client *CloudflareR2Client
+	if os.Getenv("CF_ACCOUNT_ID") != "" {
+		r2Client, err = NewCloudflareR2Client()
+		if err != nil {
+			log.Printf("Warning: Failed to initialize Cloudflare R2 client: %v", err)
+			log.Printf("Media uploads will be disabled")
+		} else {
+			log.Printf("Cloudflare R2 client initialized successfully")
+		}
+	} else {
+		log.Printf("Cloudflare R2 environment variables not set, media uploads will be disabled")
 	}
 
 	// Initialize Telegram bot
@@ -80,85 +68,117 @@ func main() {
 			continue
 		}
 
-		// Check if message contains media
-		if update.Message.Photo != nil || update.Message.Video != nil ||
-			update.Message.Audio != nil || update.Message.Document != nil ||
-			update.Message.Sticker != nil || update.Message.Animation != nil {
-			// Send message that only text is supported
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Only text messages are supported. Media cannot be uploaded to Dynalist.")
-			msg.ReplyToMessageID = update.Message.MessageID
-			bot.Send(msg)
-			continue
-		}
-
-		// Get the message text
-		messageText := update.Message.Text
-		if messageText == "" {
-			// Skip empty messages
-			continue
-		}
-
-		// Forward the message to Dynalist
-		err := addToDynalist(dynalistToken, messageText)
-		if err != nil {
-			log.Printf("Failed to add message to Dynalist: %v", err)
-
-			// Send error message back to the user
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Error adding to Dynalist: %v", err))
-			msg.ReplyToMessageID = update.Message.MessageID
-			bot.Send(msg)
-			continue
-		}
-
-		// Send confirmation message
-		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Added to Dynalist inbox")
-		msg.ReplyToMessageID = update.Message.MessageID
-		bot.Send(msg)
+		// Process the message
+		processMessage(bot, update.Message, dynalistToken, r2Client)
 	}
 }
 
-// addToDynalist sends a message to the Dynalist inbox
-func addToDynalist(token, content string) error {
-	// Create request body
-	reqBody := DynalistRequest{
-		Token:   token,
-		Content: content,
-	}
+// processMessage handles a Telegram message and adds it to Dynalist
+func processMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message, dynalistToken string, r2Client *CloudflareR2Client) {
+	// Get the message text
+	messageText := message.Text
+	var note string
+	var mediaURL string
+	var err error
 
-	// Marshal request body to JSON
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	// Create HTTP request
-	req, err := http.NewRequest("POST", dynalistAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Parse response
-	var dynalistResp DynalistResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dynalistResp); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	// Check response code
-	if dynalistResp.Code != "Ok" {
-		if dynalistResp.Message != "" {
-			return fmt.Errorf("dynalist API error: %s", dynalistResp.Message)
+	// Check if the message is forwarded
+	if message.ForwardFrom != nil || message.ForwardFromChat != nil {
+		var forwardInfo string
+		if message.ForwardFrom != nil {
+			// Forwarded from user
+			forwardInfo = fmt.Sprintf("Forwarded from: %s %s (@%s)",
+				message.ForwardFrom.FirstName,
+				message.ForwardFrom.LastName,
+				message.ForwardFrom.UserName)
+		} else if message.ForwardFromChat != nil {
+			// Forwarded from channel or group
+			forwardInfo = fmt.Sprintf("Forwarded from: %s", message.ForwardFromChat.Title)
+			if message.ForwardFromChat.UserName != "" {
+				forwardInfo += fmt.Sprintf(" (@%s)", message.ForwardFromChat.UserName)
+			}
 		}
-		return fmt.Errorf("dynalist API error: code %s", dynalistResp.Code)
+
+		if messageText == "" {
+			messageText = forwardInfo
+		} else {
+			note = forwardInfo
+		}
 	}
 
-	return nil
+	// Check if message contains media we want to process (photos)
+	if message.Photo != nil && r2Client != nil {
+		// Get the largest photo
+		photoSize := message.Photo[len(message.Photo)-1]
+
+		// Get file URL
+		fileURL, err := bot.GetFileDirectURL(photoSize.FileID)
+		if err != nil {
+			log.Printf("Failed to get photo URL: %v", err)
+		} else {
+			// Download the file
+			fileData, err := DownloadFileFromTelegram(fileURL)
+			if err != nil {
+				log.Printf("Failed to download photo: %v", err)
+			} else {
+				// Upload to Cloudflare R2
+				mediaURL, err = r2Client.UploadFile(fileData, ".jpg")
+				if err != nil {
+					log.Printf("Failed to upload photo to R2: %v", err)
+				} else {
+					log.Printf("Photo uploaded to R2: %s", mediaURL)
+
+					// Add the media URL to the note
+					if note != "" {
+						note += "\n\n"
+					}
+					note += fmt.Sprintf("Image: %s", mediaURL) //blob:https://dash.cloudflare.com/86e17624-7e1f-49af-bf44-673570bf9bdb
+				}
+			}
+		}
+	}
+
+	// Skip if no text and no media URL
+	if messageText == "" && mediaURL == "" {
+		// Send message that we need at least text
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Cannot add empty message to Dynalist.")
+		msg.ReplyToMessageID = message.MessageID
+		bot.Send(msg)
+		return
+	}
+
+	// If we have a media URL but no text, use a placeholder
+	if messageText == "" && mediaURL != "" {
+		messageText = "Image from Telegram"
+	}
+
+	// Add caption to message text if available
+	if message.Caption != "" {
+		if messageText != "" {
+			messageText += "\n\n"
+		}
+		messageText += message.Caption
+	}
+
+	// Forward the message to Dynalist
+	err = AddToDynalist(dynalistToken, messageText, note)
+	if err != nil {
+		log.Printf("Failed to add message to Dynalist: %v", err)
+
+		// Send error message back to the user
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Error adding to Dynalist: %v", err))
+		msg.ReplyToMessageID = message.MessageID
+		bot.Send(msg)
+		return
+	}
+
+	// Prepare confirmation message
+	confirmationText := "Added to Dynalist inbox"
+	if mediaURL != "" {
+		confirmationText = "Added to Dynalist inbox with image"
+	}
+
+	// Send confirmation message
+	msg := tgbotapi.NewMessage(message.Chat.ID, confirmationText)
+	msg.ReplyToMessageID = message.MessageID
+	bot.Send(msg)
 }

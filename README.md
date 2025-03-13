@@ -5,6 +5,9 @@ A Telegram bot that forwards messages to Dynalist inbox.
 ## Features
 
 - Forwards text messages from Telegram to Dynalist inbox
+- Handles forwarded messages with source information
+- Uploads images to Cloudflare R2 and includes links in Dynalist
+- Ignores stickers, animations, and audio files but processes the text
 - Authenticates users based on Telegram user ID
 - Simple deployment with Docker
 
@@ -13,14 +16,22 @@ A Telegram bot that forwards messages to Dynalist inbox.
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - Dynalist API Token (from [Dynalist Settings](https://dynalist.io/developer))
 - Your Telegram User ID (you can get it from [@userinfobot](https://t.me/userinfobot))
+- (Optional) Cloudflare R2 account for image uploads
 
 ## Environment Variables
 
 The bot requires the following environment variables:
 
+### Required:
 - `BOT_TOKEN`: Your Telegram bot token
 - `DYNALIST_TOKEN`: Your Dynalist API token
 - `TG_USER_ID`: Your Telegram user ID (as a number)
+
+### Optional (for image uploads):
+- `CF_ACCOUNT_ID`: Your Cloudflare account ID
+- `CF_ACCESS_KEY_ID`: Your Cloudflare R2 access key ID
+- `CF_ACCESS_KEY_SECRET`: Your Cloudflare R2 access key secret
+- `CF_BUCKET_NAME`: Your Cloudflare R2 bucket name
 
 ## Running Locally
 
